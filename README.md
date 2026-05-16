@@ -1,4 +1,4 @@
-# [Round 1] itstimi-XD — 1·2단계 완료
+# [Round 1] itstimi-XD — 1·2·3·4단계 완료
 
 Spring AI 1.0.0 + Ollama qwen2.5 기반 배달 상담 에이전트 / `loop-play-spring-ai-agent` Week 1 미션.
 
@@ -6,8 +6,8 @@ Spring AI 1.0.0 + Ollama qwen2.5 기반 배달 상담 에이전트 / `loop-play-
 
 - [x] 1단계 — 기본 API + System Prompt + Structured Output
 - [x] 2단계 — Prompt Engineering 정량 비교 + 실패 관찰
-- [ ] 3단계 — Streaming 응답
-- [ ] 4단계 — Observability + AI 코드 리뷰
+- [x] 3단계 — Streaming 응답
+- [x] 4단계 — Observability + AI 코드 리뷰
 
 ---
 
@@ -240,6 +240,144 @@ Ollama `/api/chat` 직접 호출 (Spring AI Structured Output 우회) — LLM의
 → raw: [`exp-temp-zero`](docs/round-1/exp-temp-zero.json) · [`exp-temp-high`](docs/round-1/exp-temp-high.json)
 
 **관찰**: 이 메시지에서는 0.0/0.3/0.7 사이 변동 0 — 메시지의 시그널이 강해서 temperature 영향이 묻힘. 더 모호하거나 보더라인 메시지에서는 차이 나타날 수 있음 (limitation, 의문점에 기록).
+
+### ⚠️ 단계 2 보강 — BeanOutputConverter의 영향 (페어 리뷰 후 발견)
+
+페어 리뷰에서 홍성혁/배정은 PR을 보고 짚게 된 통찰:
+
+**Spring AI의 `BeanOutputConverter`는 `.entity(SupportResponse.class)` 호출 시 Java enum 스키마를 자동 프롬프트에 주입**한다. 즉 PromptLab이 `defaultSystem(req.systemPrompt())`로 받은 단순/구조화 프롬프트와 **무관하게**, Spring AI는 `Category enum 6값 + Urgency 4값 + ResponsibleParty 4값` 같은 schema 힌트를 항상 끝에 붙인다.
+
+**시사점**:
+- A1/A2 (명확 메시지)와 A3/A4 (모호 메시지) 모두 categoryConsistency = 1.0 나온 이유 중 **schema 자동 주입의 기여가 크다**는 것을 처음엔 못 짚었음 (단순히 "메시지가 명확해서"로 해석).
+- 단순 vs 구조화의 **진짜 공정한 비교**는 schema 주입 없이 raw 텍스트 응답으로 받아야 함 — `BeanOutputConverter` 없는 ChatClient 흐름.
+- 그래서 결정 3 ("구조화 가치 = 위험 행동 차단")의 데이터 증거가 한 단계 더 강해진다: schema 주입으로 category만 봐선 구조화 차이를 못 잡고, B (안전 규칙) 영역에서만 차이가 드러나기 때문.
+
+→ 학습 기록의 의문점에도 별도 항목으로 추가.
+
+---
+
+## 3단계 산출물
+
+### Streaming 엔드포인트 (`/api/v1/chat/stream`)
+
+`SupportController`의 `.call()` 대신 `.stream()`을 사용하여 SSE(Server-Sent Events)로 응답을 청크 단위로 받는다.
+
+```bash
+curl -N -X POST http://localhost:8080/api/v1/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message":"주문번호 2024-1234 배달 어디쯤에 있어요?"}'
+```
+
+raw SSE 응답: [`docs/round-1/streaming-raw.txt`](docs/round-1/streaming-raw.txt). 토큰 단위로 청크 도착:
+```
+data:1
+data:)
+data: 핵
+data:심
+data: 답변
+data::
+data: 현재
+data: 배
+data:달
+...
+```
+
+### 동기 vs Streaming 체감 비교
+
+같은 메시지(시나리오 1) 호출:
+- **동기 `/api/v1/support`**: 5232ms 후 **완성된 JSON 한 번에** 도착
+- **Streaming `/api/v1/chat/stream`**: ~600ms 후 **첫 청크 도착**, 이후 토큰 단위로 누적 (TTFT 압도적 우위)
+
+→ Streaming은 **TTFT(Time-To-First-Token)에서 압도적 우위**. 총 처리 시간은 비슷하지만 사용자 체감 속도가 다름. "응답을 기다리는 빈 화면"이 사라짐.
+
+### 3단계 설계 결정
+
+#### Streaming을 모든 엔드포인트에 적용할 수 있는가?
+
+**아니오.** `/api/v1/support`처럼 Structured Output을 쓰는 엔드포인트에 `.stream()`을 적용하면 문제 발생:
+
+1. `.entity(SupportResponse.class)`는 **JSON 전체가 완성된 뒤 파싱**되어야 함 — 부분 JSON으론 record 역직렬화 불가.
+2. Spring AI의 `BeanOutputConverter`는 `Flux<String>`을 받아 누적한 뒤 한꺼번에 파싱 → **결과적으로 streaming의 의미가 사라짐** (사용자는 그대로 빈 화면에서 기다림).
+3. 대안: partial JSON 파서 (예: jq-like incremental parser) 사용. 그러나 LLM이 JSON 중간에 멈추는 케이스(`{"category": "DEL`) 처리가 까다로움.
+
+→ **Streaming은 "사람이 읽는 자연어 응답" 엔드포인트에만 적용. 시스템이 파싱해서 라우팅하는 구조화 응답엔 동기 호출 유지**.
+
+#### 프로덕션에서 Streaming 적용 시 프론트엔드는?
+
+기존 `fetch().then(res => res.json())` 패턴 X. SSE를 처리해야 함:
+- `EventSource` API 또는 `fetch()` + `ReadableStream`으로 응답 본문 읽기
+- `data:` prefix 파싱 + 청크별 UI 업데이트 (예: 텍스트 끝에 append)
+- 연결 끊김 시 재연결 / partial UI 처리
+- 백엔드 `Flux` 종료를 감지하여 "응답 완료" 시그널 명확히 표시
+
+→ 단순한 fetch 콜 한 줄에서 SSE 핸들러 한 모듈로 복잡도가 올라감. **UX 가치 vs 프론트 구현 복잡도** trade-off.
+
+---
+
+## 4단계 산출물
+
+### `PerformanceLoggingAdvisor` 구현
+
+LLM 호출 전후로 elapsed time + token 사용량 로깅하는 Advisor. `SupportController`와 `PromptLabController`에 `.defaultAdvisors(performanceAdvisor)`로 등록.
+
+```java
+@Slf4j
+@Component
+public class PerformanceLoggingAdvisor implements CallAdvisor {
+    @Override
+    public ChatClientResponse adviseCall(ChatClientRequest request, CallAdvisorChain chain) {
+        long start = System.currentTimeMillis();
+        ChatClientResponse response = chain.nextCall(request);
+        long elapsed = System.currentTimeMillis() - start;
+        var usage = response.chatResponse().getMetadata().getUsage();
+        log.info("[LLM] elapsed={}ms | promptTokens={} | completionTokens={} | totalTokens={}",
+                elapsed, usage.getPromptTokens(), usage.getCompletionTokens(), usage.getTotalTokens());
+        return response;
+    }
+}
+```
+
+### LLM 호출 관찰 결과
+
+시나리오 1 (`"주문번호 2024-1234 배달 어디쯤에 있어요?"`) 호출:
+
+```
+[LLM] elapsed=5232ms | promptTokens=873 | completionTokens=85 | totalTokens=958
+```
+
+- **promptTokens = 873**: BaedalPrompt SYSTEM_PROMPT(약 493 토큰) + 사용자 메시지(약 20 토큰) + Spring AI `BeanOutputConverter`가 자동 주입하는 JSON schema(약 360 토큰)
+- **completionTokens = 85**: SupportResponse JSON 응답
+- **elapsed = 5232ms**: warm cache 호출 (cold는 ~50초)
+
+### System Prompt 길이 2배 실험
+
+`BaedalPrompt.SYSTEM_PROMPT`를 그대로 한 번 더 이어 붙여 2배 길이로 만든 뒤 같은 시나리오 호출:
+
+| | bytes | promptTokens | elapsed | urgency |
+|---|---|---|---|---|
+| 1x prompt | 1856 | **873** | 5232ms | NORMAL |
+| 2x prompt | 3643 | **1366** | **7565ms** | **LOW** |
+
+raw: [`prompt-1x.json`](docs/round-1/prompt-1x.json) (실험 입력 형식) / 로그는 Spring 로그.
+
+**관찰**:
+- 토큰 차이 = 1366 - 873 = **493** → BaedalPrompt SYSTEM_PROMPT 자체가 약 493 토큰을 차지함.
+- 입력 토큰 1.56배 증가 → elapsed **44% 증가** (5232 → 7565ms). prompt processing time이 입력 길이에 비례.
+- **부작용**: 2x에서 urgency `NORMAL` → `LOW`로 분류가 바뀜. 긴 프롬프트가 분류 일관성을 흔들 수 있다는 신호. 단계 2의 0.3 채택과 연결되는 또 다른 trade-off.
+
+### AI 코드 리뷰
+
+상세: [`docs/round-1/ai-code-review.md`](docs/round-1/ai-code-review.md)
+
+AI에 "Spring AI로 배달 상담 챗봇 만들어줘"를 요청해 받은 코드 (단순 OpenAiChatClient + 문자열 응답)에서 발견한 **프로덕션 결함 3가지**:
+
+1. **System Prompt 부재** — Round 1 단계 2 [금지] 제거 실험에서 직접 확인한 사고 (경쟁사 비방, 보상 약속, 권위 사칭)가 즉시 가능.
+2. **API Key 하드코딩** — `new OpenAiApi("sk-proj-abc...")` 형태로 소스 코드 박힘. Git history 영구 유출 + 환경별 분리 불가.
+3. **로깅/모니터링 부재** — 비용 폭주 / latency 추적 / 품질 회귀 감지 모두 불가. Round 1 단계 4의 `PerformanceLoggingAdvisor`가 이 결함의 직접 해결책.
+
+추가 발견 5개 (총 8개 단골 결함 모두 식별): 에러 핸들링 부재 / 입력 검증 없음 / 토큰 제한 미고려 / 동기 호출만 / 문자열 파싱 (Structured Output 부재).
+
+→ **Round 1 4단계 커리큘럼이 AI 생성 코드의 8가지 단골 결함을 차례로 해결하는 흐름**이라는 게 회고적으로 보임.
 
 ---
 

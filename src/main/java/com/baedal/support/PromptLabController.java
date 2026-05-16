@@ -15,10 +15,14 @@ import java.util.stream.Collectors;
 public class PromptLabController {
 
     private final ChatClient.Builder builder;
+    private final PerformanceLoggingAdvisor performanceAdvisor;
 
     @PostMapping
     public PromptLabResult experiment(@RequestBody PromptLabRequest req) {
-        var client = builder.defaultSystem(req.systemPrompt()).build();
+        var client = builder
+                .defaultSystem(req.systemPrompt())
+                .defaultAdvisors(performanceAdvisor)
+                .build();
         List<SupportResponse> results = new ArrayList<>();
         for (int i = 0; i < req.repeat(); i++) {
             results.add(client.prompt().user(req.message()).call().entity(SupportResponse.class));

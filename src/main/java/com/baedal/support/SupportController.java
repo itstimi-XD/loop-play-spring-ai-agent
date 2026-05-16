@@ -10,11 +10,13 @@ import org.springframework.web.bind.annotation.*;
 public class SupportController {
 
     private final ChatClient.Builder builder;
+    private final PerformanceLoggingAdvisor performanceAdvisor;
 
     @PostMapping
     public SupportResponse triage(@RequestBody ChatRequest req) {
         return builder
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
+                .defaultAdvisors(performanceAdvisor)
                 .build()
                 .prompt()
                 .user(req.message())
