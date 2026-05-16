@@ -25,17 +25,23 @@ public class PerformanceLoggingAdvisor implements CallAdvisor {
     @Override
     public ChatClientResponse adviseCall(ChatClientRequest request, CallAdvisorChain chain) {
         long start = System.currentTimeMillis();
-        ChatClientResponse response = chain.nextCall(request);
-        long elapsed = System.currentTimeMillis() - start;
+        try {
+            ChatClientResponse response = chain.nextCall(request);
+            long elapsed = System.currentTimeMillis() - start;
 
-        var chatResponse = response.chatResponse();
-        if (chatResponse != null && chatResponse.getMetadata() != null && chatResponse.getMetadata().getUsage() != null) {
-            var usage = chatResponse.getMetadata().getUsage();
-            log.info("[LLM] elapsed={}ms | promptTokens={} | completionTokens={} | totalTokens={}",
-                    elapsed, usage.getPromptTokens(), usage.getCompletionTokens(), usage.getTotalTokens());
-        } else {
-            log.info("[LLM] elapsed={}ms | (no usage metadata)", elapsed);
+            var chatResponse = response.chatResponse();
+            if (chatResponse != null && chatResponse.getMetadata() != null && chatResponse.getMetadata().getUsage() != null) {
+                var usage = chatResponse.getMetadata().getUsage();
+                log.info("[LLM] elapsed={}ms | promptTokens={} | completionTokens={} | totalTokens={}",
+                        elapsed, usage.getPromptTokens(), usage.getCompletionTokens(), usage.getTotalTokens());
+            } else {
+                log.info("[LLM] elapsed={}ms | (no usage metadata)", elapsed);
+            }
+            return response;
+        } catch (RuntimeException e) {
+            long elapsed = System.currentTimeMillis() - start;
+            log.warn("[LLM] FAILED elapsed={}ms | exception={}", elapsed, e.getClass().getSimpleName(), e);
+            throw e;
         }
-        return response;
     }
 }

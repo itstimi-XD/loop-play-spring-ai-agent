@@ -1,5 +1,6 @@
 package com.baedal.support;
 
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.http.MediaType;
@@ -14,7 +15,7 @@ public class StreamingChatController {
     private final ChatClient.Builder builder;
 
     @PostMapping(produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<String> chatStream(@RequestBody ChatRequest req) {
+    public Flux<String> chatStream(@Valid @RequestBody ChatRequest req) {
         return builder
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
                 .build()

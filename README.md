@@ -269,7 +269,7 @@ curl -N -X POST http://localhost:8080/api/v1/chat/stream \
 ```
 
 raw SSE 응답: [`docs/round-1/streaming-raw.txt`](docs/round-1/streaming-raw.txt). 토큰 단위로 청크 도착:
-```
+```text
 data:1
 data:)
 data: 핵
@@ -341,7 +341,7 @@ public class PerformanceLoggingAdvisor implements CallAdvisor {
 
 시나리오 1 (`"주문번호 2024-1234 배달 어디쯤에 있어요?"`) 호출:
 
-```
+```text
 [LLM] elapsed=5232ms | promptTokens=873 | completionTokens=85 | totalTokens=958
 ```
 
@@ -378,6 +378,35 @@ AI에 "Spring AI로 배달 상담 챗봇 만들어줘"를 요청해 받은 코�
 추가 발견 5개 (총 8개 단골 결함 모두 식별): 에러 핸들링 부재 / 입력 검증 없음 / 토큰 제한 미고려 / 동기 호출만 / 문자열 파싱 (Structured Output 부재).
 
 → **Round 1 4단계 커리큘럼이 AI 생성 코드의 8가지 단골 결함을 차례로 해결하는 흐름**이라는 게 회고적으로 보임.
+
+### 메타 통찰 — CodeRabbit 자동 리뷰가 본인 코드에서도 같은 결함 짚음
+
+PR 등록 후 CodeRabbit이 우리 코드에 9개 지적을 남김. 분류해서 보면:
+
+| CodeRabbit 지적 | 우리가 AI 코드에서 비판한 결함과 매칭 |
+|---|---|
+| `SupportController:16` — `@Valid` 없음 | ✅ 결함 4 (입력 검증 없음) |
+| `StreamingChatController:17` — `@Valid` 없음 | ✅ 결함 4 (입력 검증 없음) |
+| `SupportController:24` — 예외 처리 누락 | ✅ 결함 3 (에러 핸들링 부재) |
+| `PromptLabController:31` — `repeat` 검증 없음 (DoS) | ✅ 결함 5 (토큰 제한 미고려) — 호출 수 무제한 |
+| `PromptLabController:29` — 실패 시 부분 결과 보존 X | ⚠️ 결함 3 변형 (에러 핸들링) |
+| `PerformanceLoggingAdvisor:39` — 실패 경로 로깅 미흡 | ✅ 결함 7 (로깅/모니터링 — 정상 경로만) |
+| `SupportResponse:12` — List 가변 (defensive copy 필요) | 새 결함 (불변성) |
+| `README.md:283` — 코드블록 언어 미지정 | (문서 린트) |
+| `b3-safe-response.txt:10` — 한국어 응답에 중국어 혼입 | (이건 의도적 raw 보존 — fix X. 우리 README 단계 4의 "다국어 quirk 모니터링 누락" 사고 시나리오 원본 데이터) |
+
+**핵심 통찰**: AI 코드의 8가지 단골 결함을 비판한 사람이 **본인 코드에 그 중 5-6개를 가지고 있었다**. "내가 AI 코드의 결함을 잘 본다"와 "내 코드에 그 결함이 없다"는 **별개의 능력**.
+
+→ **이번 commit에서 CodeRabbit 9개 지적 모두 반영**:
+- Bean Validation (`@NotBlank`, `@Size`, `@Min/@Max`) 도입 — 빈 message / repeat=200 모두 400 반환 확인
+- `SupportServiceException` + `@ControllerAdvice GlobalExceptionHandler` — LLM 호출 실패 시 503 + 표준 ErrorResponse
+- `SupportResponse` compact constructor에 `List.copyOf` 방어적 복사
+- `PromptLabResult`에 `successfulRuns` + `errors` 필드 — 부분 결과 보존
+- `PerformanceLoggingAdvisor`에 try-catch + 실패 elapsed/exception 로깅
+- README 코드블록에 `text` 언어 식별자 (markdownlint MD040)
+- `b3-safe-response.txt` 중국어 혼입은 fix X — 이게 우리가 발견한 quirk의 원본 raw 데이터라 보존이 평가축 (2) 합격 기준 ("LLM 출력 그대로 인용")에 맞음.
+
+→ **다음 라운드 적용 거리**: 코드 짤 때부터 "이게 AI 코드 리뷰에서 비판할 만한 결함인가" self-check 루틴 만들기. Round 2 Tool Calling은 외부 함수 호출이라 검증/예외 처리 더 중요해짐.
 
 ---
 
