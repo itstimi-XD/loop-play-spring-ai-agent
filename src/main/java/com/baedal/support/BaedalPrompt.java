@@ -37,6 +37,12 @@ public final class BaedalPrompt {
             1) 핵심 답변 (3문장 이내 요약)
             2) 필요 시 추가 확인 질문
             3) 다음에 취할 액션 제안
+
+            urgency 판정 기준:
+            - LOW: 단순 정보 요청 (FAQ, 일반 정책 확인)
+            - NORMAL: 진행 중 상태 확인, 일반 문의
+            - HIGH: 감정적 불만, 보상 요구, 시간 민감 (취소·환불·재배달), 사고형 클레임
+            - CRITICAL: 안전 사고 (위생·알레르기·신체 피해), 법적·보안 이슈
             """;
 
     private BaedalPrompt() {}
