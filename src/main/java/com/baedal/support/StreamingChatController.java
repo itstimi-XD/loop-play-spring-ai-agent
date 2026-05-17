@@ -1,24 +1,26 @@
 package com.baedal.support;
 
 import jakarta.validation.Valid;
-import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 
 @RestController
-@RequiredArgsConstructor
 @RequestMapping("/api/v1/chat/stream")
 public class StreamingChatController {
 
-    private final ChatClient.Builder builder;
+    private final ChatClient chatClient;
+
+    public StreamingChatController(ChatClient.Builder builder) {
+        this.chatClient = builder
+                .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
+                .build();
+    }
 
     @PostMapping(produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<String> chatStream(@Valid @RequestBody ChatRequest req) {
-        return builder
-                .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
-                .build()
+        return chatClient
                 .prompt()
                 .user(req.message())
                 .stream()

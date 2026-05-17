@@ -1,27 +1,28 @@
 package com.baedal.support;
 
 import jakarta.validation.Valid;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.web.bind.annotation.*;
 
 @Slf4j
 @RestController
-@RequiredArgsConstructor
 @RequestMapping("/api/v1/support")
 public class SupportController {
 
-    private final ChatClient.Builder builder;
-    private final PerformanceLoggingAdvisor performanceAdvisor;
+    private final ChatClient chatClient;
+
+    public SupportController(ChatClient.Builder builder, PerformanceLoggingAdvisor performanceAdvisor) {
+        this.chatClient = builder
+                .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
+                .defaultAdvisors(performanceAdvisor)
+                .build();
+    }
 
     @PostMapping
     public SupportResponse triage(@Valid @RequestBody ChatRequest req) {
         try {
-            return builder
-                    .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
-                    .defaultAdvisors(performanceAdvisor)
-                    .build()
+            return chatClient
                     .prompt()
                     .user(req.message())
                     .call()

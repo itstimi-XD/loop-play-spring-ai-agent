@@ -5,7 +5,6 @@ import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.web.bind.annotation.*;
@@ -17,24 +16,30 @@ import java.util.stream.Collectors;
 
 @Slf4j
 @RestController
-@RequiredArgsConstructor
 @RequestMapping("/api/v1/prompt-lab")
 public class PromptLabController {
 
-    private final ChatClient.Builder builder;
-    private final PerformanceLoggingAdvisor performanceAdvisor;
+    private final ChatClient chatClient;
+
+    public PromptLabController(ChatClient.Builder builder, PerformanceLoggingAdvisor performanceAdvisor) {
+        // systemPrompt는 요청마다 다르므로 .defaultSystem()을 미리 설정하지 않음.
+        // prompt().system(...)으로 요청 시점에 주입.
+        this.chatClient = builder
+                .defaultAdvisors(performanceAdvisor)
+                .build();
+    }
 
     @PostMapping
     public PromptLabResult experiment(@Valid @RequestBody PromptLabRequest req) {
-        var client = builder
-                .defaultSystem(req.systemPrompt())
-                .defaultAdvisors(performanceAdvisor)
-                .build();
         List<SupportResponse> results = new ArrayList<>();
         List<String> errors = new ArrayList<>();
         for (int i = 0; i < req.repeat(); i++) {
             try {
-                results.add(client.prompt().user(req.message()).call().entity(SupportResponse.class));
+                results.add(chatClient.prompt()
+                        .system(req.systemPrompt())
+                        .user(req.message())
+                        .call()
+                        .entity(SupportResponse.class));
             } catch (Exception e) {
                 log.warn("PromptLab iteration {}/{} failed", i + 1, req.repeat(), e);
                 errors.add("Iteration " + (i + 1) + ": " + e.getMessage());

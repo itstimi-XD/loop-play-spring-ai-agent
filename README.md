@@ -251,18 +251,22 @@ Ollama `/api/chat` 직접 호출 (Spring AI Structured Output 우회) — LLM의
 
 → raw text: [`b1-safe`](docs/round-1/b1-safe-response.txt) · [`b1-unsafe`](docs/round-1/b1-unsafe-response.txt) · [`b2-safe`](docs/round-1/b2-safe-response.txt) · [`b2-unsafe`](docs/round-1/b2-unsafe-response.txt) · [`b3-safe`](docs/round-1/b3-safe-response.txt) · [`b3-unsafe`](docs/round-1/b3-unsafe-response.txt)
 
-### Experiment 부록 — Temperature 비교 (0.0 vs 0.7)
+### Experiment 부록 — Temperature 비교 (0.0 / 0.3 / 0.7)
 
 같은 모호 메시지 + simplified prompt + ollama 직접 호출. 5회씩 반복.
 
 | temperature | category | urgency |
 |---|---|---|
 | **0.0** | DELIVERY 5/5 | HIGH 5/5 |
+| **0.3** (default, 채택) | DELIVERY 5/5 | HIGH 5/5 |
 | **0.7** | DELIVERY 5/5 | HIGH 5/5 |
 
-→ raw: [`exp-temp-zero`](docs/round-1/exp-temp-zero.json) · [`exp-temp-high`](docs/round-1/exp-temp-high.json)
+→ raw: [`exp-temp-zero`](docs/round-1/exp-temp-zero.json) · [`exp-temp-mid`](docs/round-1/exp-temp-mid.json) · [`exp-temp-high`](docs/round-1/exp-temp-high.json)
 
-**관찰**: 이 메시지에서는 0.0/0.3/0.7 사이 변동 0 — 메시지의 시그널이 강해서 temperature 영향이 묻힘. 더 모호하거나 보더라인 메시지에서는 차이 나타날 수 있음 (limitation, 의문점에 기록).
+**관찰** (페어 리뷰 후 0.3 측정 보강):
+- 이 메시지에서는 **0.0 / 0.3 / 0.7 모두 동일한 결과**. 메시지의 시그널이 강해서 temperature 영향이 묻힘.
+- 0.3 채택의 정량 근거가 이 메시지로는 안 잡힘 — limitation으로 명시. 운영자 보완점 (C): "0.3 측정 빠진 자리"를 단순 미측정 → 측정했으나 차이 안 나는 메시지였음으로 정정.
+- **더 모호한 보더라인 메시지** (예: `"음식이 식어요"` 같은 명사형 + 짧은 메시지)에서는 차이 나타날 가능성. Round 4 RAG 단계에서 도메인 ground truth가 생기면 정확성 metric으로 재측정 자리.
 
 ### ⚠️ 단계 2 보강 — BeanOutputConverter의 영향 (페어 리뷰 후 발견)
 
@@ -430,6 +434,58 @@ PR 등록 후 CodeRabbit이 우리 코드에 9개 지적을 남김. 분류해서
 - `b3-safe-response.txt` 중국어 혼입은 fix X — 이게 우리가 발견한 quirk의 원본 raw 데이터라 보존이 평가축 (2) 합격 기준 ("LLM 출력 그대로 인용")에 맞음.
 
 → **다음 라운드 적용 거리**: 코드 짤 때부터 "이게 AI 코드 리뷰에서 비판할 만한 결함인가" self-check 루틴 만들기. Round 2 Tool Calling은 외부 함수 호출이라 검증/예외 처리 더 중요해짐.
+
+### 운영자 리뷰 후속 — `ChatClient` 매 요청 build 패턴 정정 (보완점 A)
+
+운영자 리뷰에서 **다음 라운드 1순위**로 명시된 항목. 가이드의 "흔한 실수 #3"에 해당:
+
+> "1주차에서는 매번 build하는 패턴도 허용합니다. 다만 '왜 이렇게 했는지' 인식하고 있는지를 확인하세요. 2주차 Tool Calling에서는 이 패턴이 Builder 누적 버그로 터진다."
+
+**변경 전** (매 요청 build):
+```java
+@RequestMapping("/api/v1/support")
+public class SupportController {
+    private final ChatClient.Builder builder;
+
+    @PostMapping
+    public SupportResponse triage(@Valid @RequestBody ChatRequest req) {
+        return builder
+                .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
+                .defaultAdvisors(performanceAdvisor)
+                .build()  // ← 매 요청마다 새 ChatClient 생성
+                .prompt() ...
+    }
+}
+```
+
+**변경 후** (생성자 build, ChatClient 싱글톤화):
+```java
+public class SupportController {
+    private final ChatClient chatClient;
+
+    public SupportController(ChatClient.Builder builder, PerformanceLoggingAdvisor advisor) {
+        this.chatClient = builder
+                .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
+                .defaultAdvisors(advisor)
+                .build();  // ← 빈 생성 시 1회만
+    }
+
+    @PostMapping
+    public SupportResponse triage(@Valid @RequestBody ChatRequest req) {
+        return chatClient.prompt() ...  // 캐싱된 ChatClient 재사용
+    }
+}
+```
+
+**3개 컨트롤러 모두 적용**:
+- `SupportController`: 생성자에서 BaedalPrompt + Advisor로 `chatClient` 빌드.
+- `StreamingChatController`: 동일 패턴, Advisor 없음.
+- `PromptLabController`: **systemPrompt가 요청마다 동적이라 `defaultSystem` 안 박음**. 생성자에서 Advisor만 등록한 `chatClient` 빌드 → `prompt().system(req.systemPrompt())`로 요청 시점에 주입.
+
+**왜 중요한가** — 운영자가 짚은 Round 2 회수 자리:
+- 매 요청 build 패턴은 **Builder mutable state 누적 버그**의 위험. `.defaultSystem(A)` 후 다음 요청에서 `.defaultSystem(B)` 호출 시 같은 Builder 인스턴스 상태가 어떻게 되는지 불명.
+- Round 2에서 Tool 등록 시 `.tools(...)` 누적이 같은 패턴으로 터짐 — 강의에서 fix 커밋(`32e0c31`)으로 잡힌 자리.
+- 페어 PR #5 (신형기)는 이미 같은 패턴 + `verify(builder, times(1)).build()` 회귀 테스트까지 적용 — 운영자가 "페어 리뷰에서 가져왔으면 좋았을 것"으로 지목.
 
 ---
 
