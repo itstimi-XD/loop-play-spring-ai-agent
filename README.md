@@ -15,7 +15,7 @@ Spring AI 1.0.0 + Ollama qwen2.5 기반 배달 상담 에이전트 / `loop-play-
 
 ### 시나리오 3종 응답 (`/api/v1/support`)
 
-원본 JSON: [`docs/round-1/scenario-1.json`](docs/round-1/scenario-1.json) · [`scenario-2.json`](docs/round-1/scenario-2.json) · [`scenario-3.json`](docs/round-1/scenario-3.json)
+상세 분석 + 응답 3종: [`docs/round-1/step1-scenarios.md`](docs/round-1/step1-scenarios.md)
 
 #### 시나리오 1 — 배달 위치 문의
 요청: `"주문번호 2024-1234 배달 어디쯤에 있어요?"`
@@ -185,7 +185,7 @@ public enum ResponsibleParty { RIDER, STORE, PLATFORM, UNCLEAR }
 | **A3** | 단순 | **모호**: "음식이 이렇게 다 식어서 왔는데 이걸 누가 먹어요?" | **DELIVERY** 5/5 | NORMAL 5/5 | **1.0** |
 | **A4** | 구조화 | 동일 (모호) | **COMPLAINT** 5/5 | NORMAL 5/5 | **1.0** |
 
-→ raw JSON: [`exp-a1-simple.json`](docs/round-1/exp-a1-simple.json) · [`a2-structured`](docs/round-1/exp-a2-structured.json) · [`a3-simple-ambiguous`](docs/round-1/exp-a3-simple-ambiguous.json) · [`a4-structured-ambiguous`](docs/round-1/exp-a4-structured-ambiguous.json)
+상세 분석 + 4 실험 결과: [`docs/round-1/step2-ab-prompt-comparison.md`](docs/round-1/step2-ab-prompt-comparison.md)
 
 **핵심 발견**:
 - 명확 메시지(A1, A2): 단순/구조화 차이 0 — 메시지 자체가 분류를 결정.
@@ -203,7 +203,7 @@ A4 결과를 분석: category는 정확하지만 `urgency: NORMAL 5/5`. 감정�
 | A4 (before) | NORMAL 5/5 |
 | **C (after)** | NORMAL 4/5, **HIGH 1/5** |
 
-→ raw JSON: [`exp-c-improved`](docs/round-1/exp-c-improved.json)
+→ 같은 통합 분석 파일 ([`step2-ab-prompt-comparison.md`](docs/round-1/step2-ab-prompt-comparison.md)) "실험 C" 섹션 참조
 
 **결과 해석**:
 - 방향성 맞지만 5/5 변경엔 부족 — 1/5만 HIGH로 끌어올라감.
@@ -249,7 +249,7 @@ Ollama `/api/chat` 직접 호출 (Spring AI Structured Output 우회) — LLM의
 
 → **모델 자체 안전망 없음** — 협박에 굴복하여 보상 약속 + 금액 협의 시작. 회사가 자동 응답을 근거로 보상 의무 발생 가능.
 
-→ raw text: [`b1-safe`](docs/round-1/b1-safe-response.txt) · [`b1-unsafe`](docs/round-1/b1-unsafe-response.txt) · [`b2-safe`](docs/round-1/b2-safe-response.txt) · [`b2-unsafe`](docs/round-1/b2-unsafe-response.txt) · [`b3-safe`](docs/round-1/b3-safe-response.txt) · [`b3-unsafe`](docs/round-1/b3-unsafe-response.txt)
+상세 분석 + 3 시나리오 SAFE/UNSAFE raw: [`docs/round-1/step2-prohibition-ablation.md`](docs/round-1/step2-prohibition-ablation.md)
 
 ### Experiment 부록 — Temperature 비교 (0.0 / 0.3 / 0.7)
 
@@ -261,7 +261,7 @@ Ollama `/api/chat` 직접 호출 (Spring AI Structured Output 우회) — LLM의
 | **0.3** (default, 채택) | DELIVERY 5/5 | HIGH 5/5 |
 | **0.7** | DELIVERY 5/5 | HIGH 5/5 |
 
-→ raw: [`exp-temp-zero`](docs/round-1/exp-temp-zero.json) · [`exp-temp-mid`](docs/round-1/exp-temp-mid.json) · [`exp-temp-high`](docs/round-1/exp-temp-high.json)
+상세: [`docs/round-1/step2-temperature-comparison.md`](docs/round-1/step2-temperature-comparison.md) (raw .json 3개도 같이 보존)
 
 **관찰** (페어 리뷰 후 0.3 측정 보강):
 - 이 메시지에서는 **0.0 / 0.3 / 0.7 모두 동일한 결과**. 메시지의 시그널이 강해서 temperature 영향이 묻힘.
@@ -385,7 +385,7 @@ public class PerformanceLoggingAdvisor implements CallAdvisor {
 | 1x prompt | 1856 | **873** | 5232ms | NORMAL |
 | 2x prompt | 3643 | **1366** | **7565ms** | **LOW** |
 
-raw: [`prompt-1x.json`](docs/round-1/prompt-1x.json) (실험 입력 형식) / 로그는 Spring 로그.
+상세 (raw 입력 + 토큰 비용 분해): [`docs/round-1/step4-observability.md`](docs/round-1/step4-observability.md)
 
 **관찰**:
 - 토큰 차이 = 1366 - 873 = **493** → BaedalPrompt SYSTEM_PROMPT 자체가 약 493 토큰을 차지함.
