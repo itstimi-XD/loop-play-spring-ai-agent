@@ -4,6 +4,8 @@ import com.baedal.support.tool.OrderTools;
 import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.web.bind.annotation.*;
 
 @Slf4j
@@ -13,24 +15,28 @@ public class SupportController {
 
     private final ChatClient chatClient;
 
-    // 2주차: Structured Output(JSON) 엔드포인트에도 OrderTools를 등록해
-    //        Tool Calling과 Structured Output이 함께 동작하는지 직접 확인한다.
+    // 2주차: Structured Output(JSON) 엔드포인트에도 OrderTools를 등록.
+    // 3주차: memoryAdvisor를 (performance보다 먼저) 추가해 같은 세션 맥락을 공유.
+    //        ChatClient는 생성자에서 1회만 build (Builder 누적버그 회피), conversationId는 요청별 주입.
     public SupportController(ChatClient.Builder builder,
                              PerformanceLoggingAdvisor performanceAdvisor,
+                             MessageChatMemoryAdvisor memoryAdvisor,
                              OrderTools orderTools) {
         this.chatClient = builder
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
-                .defaultAdvisors(performanceAdvisor)
+                .defaultAdvisors(memoryAdvisor, performanceAdvisor)
                 .defaultTools(orderTools)
                 .build();
     }
 
     @PostMapping
-    public SupportResponse triage(@Valid @RequestBody ChatRequest req) {
+    public SupportResponse triage(@Valid @RequestBody ChatRequest req,
+                                  @RequestHeader(value = "X-Session-Id", defaultValue = "default") String sessionId) {
         try {
             return chatClient
                     .prompt()
                     .user(req.message())
+                    .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, sessionId))
                     .call()
                     .entity(SupportResponse.class);
         } catch (Exception e) {

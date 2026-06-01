@@ -3,10 +3,76 @@
 Spring AI 1.0.0 + Ollama qwen2.5 기반 배달 상담 에이전트.
 
 **라운드별 제출**
+- [Round 3 — 대화 맥락 관리와 메모리 설계](#round-3--대화-맥락-관리와-메모리-설계) (1·2·3단계)
 - [Round 2 — Tool Calling으로 주문/배달 시스템 연동](#round-2--tool-calling으로-주문배달-시스템-연동) (1·2·3·4단계)
 - [Round 1 — 기본 API + System Prompt + Structured Output](#round-1-itstimi-xd--1234단계-완료)
 
-> ℹ️ 일부 "왜?" 설계 결정 문항은 기술 근거 기반 **초안**이며, 제출 전 본인 목소리로 다듬는 중임을 표시해 두었습니다. 단계별 원시 데이터(시나리오 응답·로그·정량표)는 [`docs/round-2/`](docs/round-2/)에 있습니다.
+> ℹ️ 일부 "왜?" 설계 결정 문항은 기술 근거 기반 **초안**이며, 제출 전 본인 목소리로 다듬는 중임을 표시해 두었습니다. 단계별 원시 데이터(시나리오 응답·로그·정량표)는 [`docs/round-3/`](docs/round-3/), [`docs/round-2/`](docs/round-2/)에 있습니다.
+
+---
+
+# Round 3 — 대화 맥락 관리와 메모리 설계
+
+> `MessageChatMemoryAdvisor` + `X-Session-Id`로 멀티턴 대화 맥락을 관리하고, **메모리 경계(크기·저장소·세션 수명)** 를 설계·관찰한다.
+> 전체 데이터: [`docs/round-3/`](docs/round-3/)
+
+## 완료 단계
+
+- [x] **1단계** — ChatMemory 3레이어 + X-Session-Id 세션 분리 + 지시 대명사 시나리오 5종
+- [x] **2단계** — MAX_MESSAGES 크기 실험(2/8/40) 정량 비교 + 윈도우=2 파괴 관찰
+- [x] **3단계** — InMemory vs JdbcChatMemory + 재시작 영속성 실험 + 의사결정 트리
+
+## 구현 통합 방식
+
+`upstream/round3` starter의 **신규 파일**(`memory/ChatMemoryConfig`, `memory/SessionController`, `memory/JdbcChatMemoryExample`, `AssistantChatClientConfig`, `application-jdbc.yml`)을 가져오고, `AssistantController`는 round3의 **ChatClient 빈 주입** 패턴으로 교체(내가 Round 2에서 발견한 Builder 누적버그를 운영자도 같은 방식으로 해결). `SupportController`는 내 Round 2 구조(생성자 1회 build + @Valid + 예외처리)를 유지한 채 `memoryAdvisor` + `X-Session-Id`만 추가. `BaedalPrompt`에 `[대화 맥락 사용 규칙]` 섹션 추가.
+
+**메모리 3레이어**: `InMemoryChatMemoryRepository`(저장) → `MessageWindowChatMemory(maxMessages=20)`(윈도우 정책) → `MessageChatMemoryAdvisor(order=10)`(주입). conversationId는 요청별 `.advisors(a -> a.param(ChatMemory.CONVERSATION_ID, sessionId))`.
+
+## 1단계 — 시나리오 5종 (모두 PASS)
+
+전체: [`docs/round-3/step1-memory.md`](docs/round-3/step1-memory.md)
+
+| # | 시나리오 | 결과 |
+|---|----------|------|
+| 1 | "1234 어디?" → "그거 언제 도착?" | ✅ "그거"=1234 (이력 재사용) |
+| 2 | "1234 취소" → "그거 말고 1235 취소" | ✅ 대상 1235로 전환 |
+| 3 | "1234 어디?" → "아까 그 주문 언제?" | ✅ memory서 1234 추출 |
+| 4 | A "1234..." → **B** "그 주문 어디?" | ✅ B "어떤 주문을 말씀?" (세션 격리) |
+| 5 | A "1234..." → DELETE A → "그거" | ✅ memory `[]` (삭제 확인) |
+
+**세션 격리(4번)가 핵심 증거** — 같은 ChatClient 빈을 공유해도 conversationId로 완전 분리, `GET /session/ids`로 세션별 독립 저장 확인.
+
+## 2단계 — MAX_MESSAGES 크기 실험
+
+전체: [`docs/round-3/step2-memory-size.md`](docs/round-3/step2-memory-size.md) · 동일 10턴 시퀀스
+
+| MAX | promptTokens | 지시 대명사 해결 | 요약(turn10) |
+|:---:|---|---|---|
+| 2 | 평탄 ~1,800 | ❌ turn7 "그거"=**빈 응답** | ❌ 마지막 2턴만 |
+| 8 | 상승→캡 ~2,050 | ✅ "그거"=1235 | △ 최근 4턴 |
+| 40 | **선형 ↑** 2,678 | ⚠️ "그거"=1234, 오래된 사실 회수 정확 | △ 1234 thread |
+
+**발견 ①**: 윈도우=2는 USER/ASSISTANT 한 쌍만 남아 멀티턴 맥락 붕괴(turn7 빈 응답, 요약 실패).
+**발견 ② (반직관)**: 더 큰 윈도우가 항상 더 나은 해결은 아니다 — MAX=8은 "그거"를 1235로 맞췄으나 MAX=40은 1234로(전체 이력이 "최신성" 신호를 희석). 윈도우는 "클수록"이 아니라 **도메인 대화 길이에 맞춘 적정값**. (단 오래된 사실 회수는 40이 최고 — 트레이드오프.)
+
+## 3단계 — InMemory vs JDBC
+
+전체: [`docs/round-3/step3-jdbc.md`](docs/round-3/step3-jdbc.md)
+
+**재시작 영속성 실험**:
+
+| 저장소 | 재시작 후 메모리 | "그거" 질문 |
+|--------|------|------|
+| `h2:mem` | `[]` 소멸 | 맥락 없음 |
+| `h2:file` | 4건 **유지** | 재시작 전 ETA 회수 |
+
+**🐛 벤더 통합 함정**: Spring AI 1.0.0의 JDBC 메모리 스타터는 **H2용 `schema-h2.sql`을 번들하지 않음** → 기동 실패. H2(`MODE=PostgreSQL`)용 스키마를 직접 작성(`db/schema-h2.sql`)하고 `spring.ai.chat.memory.repository.jdbc.schema`로 지정해 해결. 실제 기동에서만 드러나는 이슈.
+
+## 리뷰 요청 포인트 (Round 3)
+
+1. **발견 ②(큰 윈도우 ≠ 더 나은 해결)** 가 qwen2.5 한정인지, 더 큰 모델/요약 전략에서도 나타나는지.
+2. **상태 변경(취소) 대상이 지시 대명사로 결정될 때** human-in-the-loop 재확인을 강제하는 게 맞는지(설계 결정 doc 기준 100% 미만 자동실행 금지).
+3. SupportController를 round3 starter처럼 요청별 build로 두지 않고 **생성자 1회 build 유지 + memoryAdvisor**로 간 선택.
 
 ---
 
