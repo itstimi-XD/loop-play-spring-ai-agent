@@ -1,3 +1,104 @@
+# loop-play-spring-ai-agent — itstimi-XD (김인후)
+
+Spring AI 1.0.0 + Ollama qwen2.5 기반 배달 상담 에이전트.
+
+**라운드별 제출**
+- [Round 2 — Tool Calling으로 주문/배달 시스템 연동](#round-2--tool-calling으로-주문배달-시스템-연동) (1·2·3·4단계)
+- [Round 1 — 기본 API + System Prompt + Structured Output](#round-1-itstimi-xd--1234단계-완료)
+
+> ℹ️ 일부 "왜?" 설계 결정 문항은 기술 근거 기반 **초안**이며, 제출 전 본인 목소리로 다듬는 중임을 표시해 두었습니다. 단계별 원시 데이터(시나리오 응답·로그·정량표)는 [`docs/round-2/`](docs/round-2/)에 있습니다.
+
+---
+
+# Round 2 — Tool Calling으로 주문/배달 시스템 연동
+
+> `@Tool`로 주문 조회/취소를 LLM에 연결하고, **Tool의 경계(boundary)** 를 설계·관찰한다.
+> 엔드포인트: `POST /api/v1/assistant`(Tool Calling 자연어) · `POST /api/v1/support`(Structured Output + Tool).
+
+## 완료 단계
+
+- [x] **1단계** — Tool 3개(getOrderDetail/getDeliveryStatus/cancelOrder) + Mock 6건 + 양 컨트롤러 등록 → 시나리오 5종 검증
+- [x] **2단계** — cancelOrder 멱등성: Outcome 4경로 + 멱등 분기 제거 실패 관찰
+- [x] **3단계** — Tool description 4버전 실험(명확/모호/오도/금지) 정량 비교
+- [x] **4단계** — Observability(입력 토큰 측정) + AI 코드 리뷰 결함 3개
+
+## 구현 통합 방식
+
+`upstream/round2` starter의 **신규 9개 파일**(`AssistantController`, `domain/`×4, `tool/`×4)만 가져오고, Round 1과 겹치는 파일은 **내 Round 1 버전을 유지**했다(5개 [금지] 규칙, `responsibleParties`/`suspicionSignals` 필드, `COMPLAINT` 카테고리, `@Valid` 검증 보존). Round 2용 변경은 두 곳뿐: `BaedalPrompt`에 `[Tool 사용 규칙]` 섹션 추가 / `SupportController`·`AssistantController`에 `.defaultTools(orderTools)` 등록.
+
+## 1단계 — 시나리오 5종 (`/api/v1/assistant`)
+
+전체 응답·로그: [`docs/round-2/step1-scenarios.md`](docs/round-2/step1-scenarios.md)
+
+| # | 요청 | Tool(로그 확인) | 결과 |
+|---|------|------|------|
+| 1 | "2024-1234 배달 어디쯤?" | getDeliveryStatus | "역삼역 사거리 부근 배송 중" ✅ |
+| 2 | "2024-1234 어떤 메뉴?" | getOrderDetail | "허니콤보+콜라, 26,000원" ✅ |
+| 3 | "2024-1235 취소" | cancelOrder | CANCELED ✅ |
+| 4 | "2024-1236 취소" | cancelOrder | NOT_CANCELABLE(DELIVERED) ✅ |
+| 5 | "2099-9999 배달?" | (null 반환) | "찾을 수 없습니다" ✅ |
+
+### 🐛 발견·수정한 버그 — ChatClient.Builder Tool 누적
+초기 `AssistantController`는 요청마다 주입된 `ChatClient.Builder`로 `.defaultTools().build()`를 호출했다. Builder가 가변이라 2번째 요청부터 같은 빌더에 Tool이 누적 → `IllegalStateException: Multiple tools with the same name`. 1번째 요청만 통과(3개), 2번째부터 폭발(6개)이 결정적 증거. **생성자에서 1회 build로 수정.** 단위 테스트로는 안 잡히고 실제 구동에서만 드러나는 버그.
+
+### 설계 결정 (1단계) — *초안, 제출 전 검토*
+- **OrderDetailView가 뺀 필드**: `deliveryAddress`(고객 본인 정보지만 상세조회 목적엔 불필요), `riderLocation`(→ getDeliveryStatus로 책임 분리), `canceledReason`/`canceledAt`(취소 이력은 별도 경로). LLM 입력 토큰 절감 + 책임 분리.
+- **description 한국어**: 도메인 프롬프트 전체가 한국어 + qwen2.5 한국어 처리 일관성. (3단계에서 영어 대비 효율은 미검증.)
+- **OrderTools 단일 클래스**: 현재 3개 규모에선 한 도메인(주문)이라 응집. 분리 기준은 조회 vs 변경(cancelOrder) 또는 주문 vs 결제. 지금은 분리 비용 > 이득.
+
+## 2단계 — 멱등성
+
+전체: [`docs/round-2/step2-idempotency.md`](docs/round-2/step2-idempotency.md)
+
+Outcome 4경로 모두 `[Tool] cancelOrder` 로그로 실호출 확인:
+NOT_FOUND / NOT_CANCELABLE("조리 중이라 취소 불가") / ALREADY_CANCELED("이미 취소…(사유: 고객 요청)") / CANCELED. 실패를 **예외 아닌 결과 값**으로 돌려 LLM이 상황별로 다르게 안내 가능.
+
+**멱등 분기 제거 실험**: `if(status==CANCELED) return ALREADY_CANCELED` 제거 후 2024-1239 연속 2회 취소 → 2차가 `NOT_CANCELABLE`로 fall-through하여 자기모순 응답:
+> "조리가 시작되어 취소할 수 없습니다. 현재 상태는 취소된 것으로 표시되어 있습니다."
+
+이미 취소된 주문에 "조리 때문에 못 취소"라는 **틀린 사유**를 전달. (고객 오해 3가지 + 프로덕션 장애 3가지는 docs 참조 — 이중환불/알림중복/취소이력 덮어쓰기.)
+
+## 3단계 — description 실험 (정량)
+
+전체: [`docs/round-2/step3-description.md`](docs/round-2/step3-description.md) · 동일 질문 5회씩
+
+| 버전 | description | getDeliveryStatus 호출 |
+|------|-------------|:---:|
+| A 명확(4요소) | full | 4/5 |
+| B 모호 | "배달 상태를 조회한다." | **5/5** |
+| C 오도 | "영수증 재발송…배달 무관" | **5/5** (거짓 무시) |
+| C-strong 명시적 금지 | "호출 금지" | **0/5** (degrade) |
+
+**핵심 발견**: "description이 유일한 API 문서"는 부분적으로만 참. 작은 모델은 **메서드 이름**을 강한 신호로 쓴다 — 오도 description(C)은 무시됐고, 명시적 금지(C-strong)에서야 호출이 멈췄다. 막히자 모델은 형제 tool 대체(라이더 위치 소실), tool-call 마크업 누출, 존재하는 주문 "없음" 환각으로 **불안정하게 붕괴**. → **이름과 description은 같은 방향을 가리켜야 한다.**
+
+## 4단계 — Observability + AI 코드 리뷰
+
+전체: [`docs/round-2/step4-observability.md`](docs/round-2/step4-observability.md)
+
+**입력 토큰** (`PerformanceLoggingAdvisor` 측정):
+
+| 호출 | promptTokens |
+|------|:---:|
+| /assistant "안녕"(tool 미호출) | 1,569 |
+| /assistant 배달질문(tool 왕복) | 3,298 |
+| /support 메뉴질문(structured+tool) | 3,983 |
+
+Tool 3개 등록만으로 유저 발화 전 ~1,569 토큰(스키마 상주). 왕복 시 tool 결과 되먹임으로 약 2.1배. **tool은 호출 안 해도 비용이 든다.**
+
+**AI 코드 리뷰 결함 3개**: ① cancelOrder check-then-act 경쟁(이중 취소) ② 권한 검증 부재 + 순차 ID = IDOR ③ 인메모리 → 재시작 시 취소 상태 부활·감사 손실.
+
+## 라운드 전반 실패 관찰 — qwen2.5 Tool Calling 불안정성
+
+temperature 0.3에서 같은 입력이 (정상 호출 / tool-call 텍스트 누출 / 호출 생략 / 환각)으로 갈림. 특히 위험: NOT_FOUND 주문에 tool 미호출인데 "취소가 완료되었습니다" **허위 확정**. → 프로덕션이라면 tool 결과 없는 확정 표현 차단 / 재시도·폴백 / 큰 모델 라우팅 필요. **Round 3 멀티턴에서 이 변동성이 누적되면?** 으로 연결.
+
+## 리뷰 요청 포인트 (Round 2)
+
+1. **3단계 발견(이름 > description)** 이 qwen2.5 한정인지, 더 큰 모델에선 description이 이길지. 페어의 모델로 C 버전 재현되는지.
+2. **Structured Output + Tool Calling 합성**(`/support`에서 getOrderDetail(null) 호출)이 설계상 피해야 할 안티패턴인지, 프롬프트로 교정 가능한지.
+3. **멱등성을 "에러" 아닌 "같은 응답 재전달"로 택한 것**이 배달 도메인에 맞는지.
+
+---
+
 # [Round 1] itstimi-XD — 1·2·3·4단계 완료
 
 Spring AI 1.0.0 + Ollama qwen2.5 기반 배달 상담 에이전트 / `loop-play-spring-ai-agent` Week 1 미션.
