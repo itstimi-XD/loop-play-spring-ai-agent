@@ -3,11 +3,100 @@
 Spring AI 1.0.0 + Ollama qwen2.5 기반 배달 상담 에이전트.
 
 **라운드별 제출**
+- [Round 4 — RAG로 배달 정책/FAQ 연동](#round-4--rag로-배달-정책faq-연동) (1·2·3·4단계)
 - [Round 3 — 대화 맥락 관리와 메모리 설계](#round-3--대화-맥락-관리와-메모리-설계) (1·2·3단계)
 - [Round 2 — Tool Calling으로 주문/배달 시스템 연동](#round-2--tool-calling으로-주문배달-시스템-연동) (1·2·3·4단계)
 - [Round 1 — 기본 API + System Prompt + Structured Output](#round-1-itstimi-xd--1234단계-완료)
 
-> ℹ️ 일부 "왜?" 설계 결정 문항은 기술 근거 기반 **초안**이며, 제출 전 본인 목소리로 다듬는 중임을 표시해 두었습니다. 단계별 원시 데이터(시나리오 응답·로그·정량표)는 [`docs/round-3/`](docs/round-3/), [`docs/round-2/`](docs/round-2/)에 있습니다.
+> ℹ️ 일부 "왜?" 설계 결정 문항은 기술 근거 기반 **초안**이며, 제출 전 본인 목소리로 다듬는 중임을 표시해 두었습니다. 단계별 원시 데이터(시나리오 응답·로그·정량표)는 [`docs/round-4/`](docs/round-4/), [`docs/round-3/`](docs/round-3/), [`docs/round-2/`](docs/round-2/)에 있습니다.
+
+---
+
+# Round 4 — RAG로 배달 정책/FAQ 연동
+
+> 정책/FAQ 문서를 임베딩→PgVector에 적재하고, `QuestionAnswerAdvisor`가 질문마다 관련 정책을 검색해 프롬프트에 주입(RAG). 환불/보상 수치를 **지어내지 않고 정책 원문 근거로** 답하게 만든다.
+> 전체 데이터: [`docs/round-4/`](docs/round-4/)
+
+## 완료 단계
+
+- [x] **1단계** — RAG 기본(임베딩 + PgVector + QuestionAnswerAdvisor) + 정책 검색/Fallback 검증
+- [x] **2단계** — chunkSize 200/800/2000 정량 실험 (TRUNCATE 통제) + 청킹의 진짜 실패 조건 규명
+- [x] **3단계** — Memory↔RAG Advisor 순서 뒤집기 → 멀티턴 붕괴 관찰
+- [x] **4단계** — RAG 입력 토큰 비용 측정 + AI 코드 리뷰 결함 3개
+
+## 구성 (메모리 3레이어 위에 RAG 추가)
+
+`upstream/round4` starter의 **신규 파일**(`rag/{RagConfig,KnowledgeLoader,FaqDocument}`, `knowledge/*.md` 7건, `docker-compose.yml`)을 가져오고, R3 구조(AssistantChatClientConfig 빈 + SupportController 생성자 build)를 유지한 채 **양쪽 Advisor 체인에 `QuestionAnswerAdvisor`(order=20)만 추가**. `BaedalPrompt`에 `[정책 인용 규칙]`(Fallback/수치 원문 유지/범위 밖 안내/복수 정책 우선) 추가.
+
+**RAG 파이프라인**: `knowledge/*.md` → `KnowledgeLoader`(ApplicationRunner, faqId 중복방지) → 임베딩 `qwen3-embedding:0.6b`(1024dim) → `vector_store`(PgVector, HNSW/COSINE) → 질문 시 `QuestionAnswerAdvisor`가 TOP_K=4 / threshold=0.5로 검색 후 Context 주입.
+
+> 🛠 **환경**: PgVector는 `docker compose up -d`. 로컬 native postgres가 5432를 점유하는 환경 충돌을 피해 컨테이너를 **호스트 5433**으로 매핑(`docker-compose.yml` + `application.yml` datasource 일치). `dimensions=1024` ↔ 임베딩 모델 차원 일치 필수(불일치 = 조용한 실패).
+
+## 1단계 — RAG 기본
+
+전체: [`docs/round-4/step1-rag-basic.md`](docs/round-4/step1-rag-basic.md) · `vector_store` 7 rows(문서당 1청크)
+
+| 질문 | 결과 |
+|------|------|
+| "음식 상해서 환불받고 싶어요" | `refund-after-delivered` 인용 ✅ |
+| "배달 늦었는데 보상?" | `delay-compensation` **원문 수치 그대로**("60분+ 전액 환불") ✅ |
+| "오늘 점심 추천" (범위 밖) | "배달 주문 관련 문의만 도와드릴 수 있습니다" Fallback ✅ |
+
+→ RAG 없으면 환불/보상 수치를 지어냈을 질문을, 검색된 정책 원문 근거로 답함.
+
+## 2단계 — 청킹 실험
+
+전체: [`docs/round-4/step2-chunking.md`](docs/round-4/step2-chunking.md)
+
+| chunkSize | 조각 수 | 결과 |
+|:---:|:---:|---|
+| 200 | 21 | 정상 (TOP_K=4가 같은 문서 조각 함께 회수 → 오히려 더 상세) |
+| 800 | 7 | 깔끔 (1정책=1조각) |
+| 2000 | 7 | 800과 동일 (문서 < 2000토큰) |
+
+**발견**: 교과서의 "작게 자르면 조각남→환각"은 우리 코퍼스(정책 7건, 각 1주제·600자)에선 **재현 안 됨** — TOP_K=4가 조각을 다시 모아줘서. 그 실패는 **큰 다주제 문서 + 작은 TOP_K**라야 발생. → 청크 크기는 "문서당 주제 수 × TOP_K"에 맞춰 정하는 변수. (별개로, 작은 임베딩 모델 0.6b는 일부 질문 표현에서 유사도가 임계값 0.5 밑으로 떨어져 검색을 놓치는 취약성도 관찰 — 청킹과 무관.) **채택: 800.**
+
+## 3단계 — Advisor 순서
+
+전체: [`docs/round-4/step3-advisor-order.md`](docs/round-4/step3-advisor-order.md)
+
+turn1 "2024-1234 주문 음식 상함" → turn2 "아까 그거 환불돼요?"
+
+| 순서 | turn2 |
+|------|-------|
+| 정상 memory(10)→rag(20) | "그거"=2024-1234 복원, 환불정책 안내 ✅ |
+| 뒤집음 rag(5)→memory(10) | "그거" 못 풀고 "주문번호 알려주세요" 되물음 ❌ (+ 중국어 누출) |
+
+**발견**: Memory가 먼저 대명사를 orderId로 복원해야 RAG가 "그 주문의 정책"을 검색할 수 있다. order 숫자는 곧 **데이터 의존성(memory 출력 → rag 입력)**. 그리고 환각 방어는 임계값(검색 레벨) + [정책 인용 규칙] Fallback(생성 레벨)의 **이중 방어** — 임계값만으론 지어내기를 못 막음.
+
+## 4단계 — 토큰 비용 + AI 코드 리뷰
+
+전체: [`docs/round-4/step4-observability.md`](docs/round-4/step4-observability.md)
+
+| 호출 | promptTokens |
+|------|:---:|
+| 정책 질문 (RAG 검색 발동) | 2,924 |
+| 인사 (검색 결과 없음) | ~2,044 |
+
+→ RAG가 정책을 회수·주입하면 입력 토큰 **+약 880(~43%)**. 비용은 TOP_K × 청크 크기에 비례 — "정확도↑ ↔ 토큰·지연↑" 트레이드오프.
+
+**AI 코드 리뷰 결함 3개**: ① `alreadyLoaded()`가 faqId만 봐서 **내용 변경 감지 못 함**(낡은 정책 영구 잔존) ② 임베딩 차원 불일치 **조용한 실패**(기동 시 fail-fast 검증 없음) ③ `filterExpression` 문자열 결합 취약.
+
+## 학습 기록 (Round 4)
+
+### 내가 배운 것
+- **RAG라는 발상 자체가 새로웠다**: LLM은 모르는 건 그냥 그럴듯하게 지어내는데, "문서를 먼저 검색해서 그 근거로만 답해라"로 묶으니까 환불 수치 같은 걸 안 지어내고 원문 그대로 답했다. 환각을 막는 게 프롬프트로 잔소리하는 게 아니라 "근거를 먼저 찾아 넣어주는 구조"라는 점이 새로웠다.
+
+### 의문점
+- **임계값을 어떻게 정하나**: 0.5로 두니까 쿠폰이나 환불처럼 분명히 있는 정책도 작은 임베딩 모델이 유사도를 낮게 줘서 자꾸 놓쳤다(Fallback). 낮추면 검색은 잘 되겠지만 범위 밖 질문에 엉뚱한 정책이 낄 텐데, 임계값을 손봐야 하는지 임베딩 모델을 키워야 하는지 모르겠다.
+
+### 다음에 해보고 싶은 것
+- **임계값이냐 모델 크기냐**: 큰 임베딩 모델로 바꿔서 자꾸 놓치던 질문(특히 쿠폰)이 임계값을 넘는지 보고 싶다. 모델만 키워도 Fallback이 줄면 뭐가 진짜 레버인지 알 수 있을 것 같다.
+
+## 리뷰 요청 포인트 (Round 4)
+1. 2단계 "작은 코퍼스에선 청크 크기 영향 적음" 발견이 타당한지, 큰 문서/작은 TOP_K로 fragmentation을 재현해 본 페어 있는지.
+2. 작은 임베딩 모델(0.6b)의 임계값 0.5 미달 Fallback — threshold를 낮춰야 하나, 아니면 임베딩 모델을 키워야 하나.
+3. Advisor order를 "데이터 의존성"으로 보는 관점이 적절한지.
 
 ---
 
@@ -67,6 +156,18 @@ Spring AI 1.0.0 + Ollama qwen2.5 기반 배달 상담 에이전트.
 | `h2:file` | 4건 **유지** | 재시작 전 ETA 회수 |
 
 **🐛 벤더 통합 함정**: Spring AI 1.0.0의 JDBC 메모리 스타터는 **H2용 `schema-h2.sql`을 번들하지 않음** → 기동 실패. H2(`MODE=PostgreSQL`)용 스키마를 직접 작성(`db/schema-h2.sql`)하고 `spring.ai.chat.memory.repository.jdbc.schema`로 지정해 해결. 실제 기동에서만 드러나는 이슈.
+
+## 학습 기록 (Round 3)
+
+### 내가 배운 것
+- **LLM은 진짜로 "기억"하지 않는다**: "그거", "아까 그 주문"을 알아듣는 게 신기했는데, 알고 보니 매 요청마다 이전 대화를 프롬프트에 다시 끼워 넣어주는 구조였다. 모델이 기억하는 게 아니라 우리가 과거를 계속 다시 보내주는 것.
+- **세션 분리는 편의 기능이 아니라 사고 방지선**: X-Session-Id로 손님별 대화를 안 나누면 한 사람 대화가 다른 사람한테 새어 나간다. 개인정보 사고를 막는 경계였다.
+
+### 의문점
+- **메모리는 크다고 좋은 게 아니었다**: 윈도우 8이 40보다 "그거"를 더 정확히 맞췄다(맥락이 많으니 최신 언급이 묻힘). 도메인마다 적정 윈도우를 어떻게 정하나? 슬라이딩 윈도우 말고 "요약" 방식이 맞는 경우는 언제인가?
+
+### 다음 주차 시도하고 싶은 것
+- **윈도우 + 요약 하이브리드**: 오래된 대화는 요약해서 남기면 윈도우 8의 정확도와 40의 풍부함을 둘 다 가질 수 있는지 실험해보고 싶다.
 
 ## 리뷰 요청 포인트 (Round 3)
 
@@ -156,6 +257,18 @@ Tool 3개 등록만으로 유저 발화 전 ~1,569 토큰(스키마 상주). 왕
 ## 라운드 전반 실패 관찰 — qwen2.5 Tool Calling 불안정성
 
 temperature 0.3에서 같은 입력이 (정상 호출 / tool-call 텍스트 누출 / 호출 생략 / 환각)으로 갈림. 특히 위험: NOT_FOUND 주문에 tool 미호출인데 "취소가 완료되었습니다" **허위 확정**. → 프로덕션이라면 tool 결과 없는 확정 표현 차단 / 재시도·폴백 / 큰 모델 라우팅 필요. **Round 3 멀티턴에서 이 변동성이 누적되면?** 으로 연결.
+
+## 학습 기록 (Round 2)
+
+### 내가 배운 것
+- **description은 사람용 주석이 아니라 LLM용 설명서**: 코드 주석인 줄 알았는데, LLM이 "이 도구를 언제 부를지" 판단하는 유일한 근거였다. 설명을 잘못 쓰면 도구를 엉뚱하게 부른다.
+- **실패를 예외가 아니라 결과값으로**: cancelOrder가 예외를 던지면 LLM은 "오류났어요"만 반복하는데, Outcome enum으로 돌려주니 상황별로 다르게 안내했다.
+
+### 의문점
+- **작은 모델은 이름 > description**: 거짓 description을 무시하고 메서드 이름 보고 호출했다. 큰 모델은 description을 제대로 따르는지, 이름 의존이 모델 크기와 무관한 습성인지 모르겠다.
+
+### 다음 주차 시도하고 싶은 것
+- **이름 vs 설명, 어느 신호가 센지 측정**: description을 망가뜨리거나 이름을 헷갈리게 바꿔서, 모델이 어느 신호를 더 따르는지 체계적으로 재보고 싶다.
 
 ## 리뷰 요청 포인트 (Round 2)
 

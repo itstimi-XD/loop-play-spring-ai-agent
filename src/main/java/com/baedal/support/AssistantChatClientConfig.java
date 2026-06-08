@@ -3,6 +3,7 @@ package com.baedal.support;
 import com.baedal.support.tool.OrderTools;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.client.advisor.vectorstore.QuestionAnswerAdvisor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -26,6 +27,7 @@ public class AssistantChatClientConfig {
     @Bean
     public ChatClient assistantChatClient(ChatClient.Builder builder,
                                           MessageChatMemoryAdvisor memoryAdvisor,
+                                          QuestionAnswerAdvisor ragAdvisor,
                                           PerformanceLoggingAdvisor performanceAdvisor,
                                           OrderTools orderTools) {
         // TODO [1단계-H] memoryAdvisor를 default advisor 체인에 추가하라.
@@ -39,7 +41,9 @@ public class AssistantChatClientConfig {
         //   - 세션별 conversationId는 컨트롤러에서 호출 단위로 .advisors(a -> ...)로 주입한다.
         return builder
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
-                .defaultAdvisors(memoryAdvisor, performanceAdvisor)
+                // 4주차: memoryAdvisor(10) → ragAdvisor(20) → performanceAdvisor(100) 순서.
+                // Memory가 "아까 그 주문"의 orderId를 복원한 뒤 RAG가 그 정책을 검색해야 한다.
+                .defaultAdvisors(memoryAdvisor, ragAdvisor, performanceAdvisor)
                 .defaultTools(orderTools)
                 .build();
     }

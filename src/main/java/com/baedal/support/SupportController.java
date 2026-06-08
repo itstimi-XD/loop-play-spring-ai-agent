@@ -5,6 +5,7 @@ import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.client.advisor.vectorstore.QuestionAnswerAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.web.bind.annotation.*;
 
@@ -17,14 +18,16 @@ public class SupportController {
 
     // 2주차: Structured Output(JSON) 엔드포인트에도 OrderTools를 등록.
     // 3주차: memoryAdvisor를 (performance보다 먼저) 추가해 같은 세션 맥락을 공유.
+    // 4주차: ragAdvisor(order 20)를 memory 뒤·performance 앞에 추가해 정책/FAQ를 검색·주입.
     //        ChatClient는 생성자에서 1회만 build (Builder 누적버그 회피), conversationId는 요청별 주입.
     public SupportController(ChatClient.Builder builder,
                              PerformanceLoggingAdvisor performanceAdvisor,
                              MessageChatMemoryAdvisor memoryAdvisor,
+                             QuestionAnswerAdvisor ragAdvisor,
                              OrderTools orderTools) {
         this.chatClient = builder
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
-                .defaultAdvisors(memoryAdvisor, performanceAdvisor)
+                .defaultAdvisors(memoryAdvisor, ragAdvisor, performanceAdvisor)
                 .defaultTools(orderTools)
                 .build();
     }
